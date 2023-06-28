@@ -1,4 +1,5 @@
-﻿using System.Security.Claims;
+﻿using System.Net.Mime;
+using System.Security.Claims;
 using DiaFactoApi.Models;
 using DiaFactoApi.Models.Api.SubjectTime;
 using Microsoft.AspNetCore.Authorization;
@@ -11,7 +12,9 @@ namespace DiaFactoApi.Controllers;
 [Authorize]
 [ApiController]
 [Route("/subjectTime")]
-public class SubjectTimeController : ControllerBase
+[Consumes(MediaTypeNames.Application.Json)]
+[Produces(MediaTypeNames.Application.Json)]
+public class SubjectTimeController : AuthBoundController
 {
     private readonly ILogger<SubjectTimeController> _logger;
     private readonly DiaFactoDbContext _db;
@@ -25,17 +28,13 @@ public class SubjectTimeController : ControllerBase
     [HttpGet]
     public async Task<Results<Ok<SubjectTimeDisplay[]>,BadRequest>> GetSubjectTimes()
     {
-        var myGroupId = User.FindFirstValue(ClaimTypes.GroupSid) ?? "-1";
-        var myGroup = await _db.Groups
-            .Include(g => g.Subjects)
-            .ThenInclude(s => s.SubjectTimes)
-            .FirstOrDefaultAsync(g => g.Id == int.Parse(myGroupId));
+        var myGroup = await GetMyGroup(_db);
         if (myGroup is null)
             return TypedResults.BadRequest();
         
         var subjectTimes = myGroup.Subjects
             .SelectMany(s => s.SubjectTimes)
-            .Select(SubjectTimeDisplay.FromSubjectTime)
+            .Select(st => st.ToSubjectTimeDisplay())
             .ToArray();
 
         return TypedResults.Ok(subjectTimes);
@@ -44,30 +43,17 @@ public class SubjectTimeController : ControllerBase
     [HttpPost("create")]
     public async Task<Results<Created<SubjectTimeDisplay>, BadRequest>> CreateSubjectTime(CreateSubjectTimeRequest request)
     {
-        var myGroupId = User.FindFirstValue(ClaimTypes.GroupSid) ?? "-1";
-        var myGroup = await _db.Groups
-            .Include(g => g.Subjects)
-            .ThenInclude(s => s.SubjectTimes)
-            .FirstOrDefaultAsync(g => g.Id == int.Parse(myGroupId));
-        if (myGroup is null)
-            return TypedResults.BadRequest();
-        
-        var mySubject = myGroup.Subjects.FirstOrDefault(s => s.Id == request.SubjectId);
+        var myGroup = await GetMyGroup(_db);
+        var mySubject = myGroup?.Subjects.FirstOrDefault(s => s.Id == request.SubjectId);
+
         if (mySubject is null)
             return TypedResults.BadRequest();
         
-        var subjectTime = new SubjectTime
-        {
-            Id = 0,
-            SubjectId = request.SubjectId,
-            DayNumber = request.DayNumber,
-            TimeStart = request.TimeStart,
-            TimeEnd = request.TimeEnd,
-            WeekType = request.WeekType
-        };
+        var subjectTime = request.ToSubjectTime();
         await _db.SubjectTimes.AddAsync(subjectTime);
         await _db.SaveChangesAsync();
-        var display = SubjectTimeDisplay.FromSubjectTime(subjectTime);
+        _logger.LogInformation("[SubjectTime] [Create] {SubjectTimeId}", subjectTime.Id);
+        var display = subjectTime.ToSubjectTimeDisplay();
         return TypedResults.Created($@"subjectTime/{subjectTime.Id}", display);
     }
 }

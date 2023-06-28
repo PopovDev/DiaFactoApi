@@ -10,6 +10,5 @@ public record LoginResponseModel
     [JsonPropertyName("expiresAt")] public required DateTimeOffset ExpiresAt { get; init; }
     [JsonPropertyName("userId")] public required int UserId { get; init; }
     [JsonPropertyName("groupId")] public required int GroupId { get; init; }
-    [Range(0, 1)]
     [JsonPropertyName("loginMode")] public required LoginRequestMode LoginMode { get; init; }
 }

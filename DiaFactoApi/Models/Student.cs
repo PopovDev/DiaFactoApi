@@ -17,4 +17,5 @@ public class Student
     public required string ShortName { get; set; }
     public string Info { get; set; } = "";
     public required string Password { get; set; }
+    public required bool HasAdminRights { get; set; }
 }

@@ -1,4 +1,5 @@
-﻿using System.Security.Claims;
+﻿using System.Net.Mime;
+using System.Security.Claims;
 using DiaFactoApi.Models.Api.Student;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -8,8 +9,10 @@ namespace DiaFactoApi.Controllers;
 
 [Authorize]
 [ApiController]
-[Route("/student/my")]
-public class StudentController: ControllerBase
+[Route("/student")]
+[Consumes(MediaTypeNames.Application.Json)]
+[Produces(MediaTypeNames.Application.Json)]
+public class StudentController : AuthBoundController
 {
     private readonly ILogger<StudentController> _logger;
     private readonly DiaFactoDbContext _db;
@@ -19,17 +22,30 @@ public class StudentController: ControllerBase
         _logger = logger;
         _db = db;
     }
-    
-    [HttpPut("info")]
-    public async Task<Results<NoContent, BadRequest>> ChangeStudentInfo(ChangeMyStudentInfoRequest request)
+
+    [HttpGet("")]
+    [ProducesResponseType(typeof(StudentDisplay[]), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status401Unauthorized)]
+    public async Task<Results<Ok<StudentDisplay[]>, UnauthorizedHttpResult>> GetStudents()
     {
-        var myStudentId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "-1";
-        var myStudent = await _db.Students.FindAsync(int.Parse(myStudentId));
+        var myGroup = await GetMyGroup(_db);
+        if (myGroup is null)
+            return TypedResults.Unauthorized();
+
+        var students = myGroup.Students.Select(x => x.ToStudentDisplay()).ToArray();
+        return TypedResults.Ok(students);
+    }
+
+    [HttpPut("my/info")]
+    [ProducesResponseType(typeof(void), StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status401Unauthorized)]
+    public async Task<Results<NoContent, UnauthorizedHttpResult>> ChangeStudentInfo(
+        ChangeMyStudentInfoRequest request)
+    {
+        var myStudent = await GetMyStudent(_db);
         if (myStudent is null)
-            return TypedResults.BadRequest();
+            return TypedResults.Unauthorized();
         
-        if (request.Info is null && request.ShortName is null)
-            return TypedResults.BadRequest();
         if (request.Info is not null)
         {
             myStudent.Info = request.Info;
@@ -39,22 +55,23 @@ public class StudentController: ControllerBase
         if (request.ShortName is not null)
         {
             myStudent.ShortName = request.ShortName;
-            _logger.LogInformation("Student {StudentId} changed short name to {ShortName}", myStudent.Id, request.ShortName);
+            _logger.LogInformation("Student {StudentId} changed short name to {ShortName}", myStudent.Id,
+                request.ShortName);
         }
-        
+
         await _db.SaveChangesAsync();
         return TypedResults.NoContent();
     }
-    
-    [HttpGet("")]
-    public async Task<Results<Ok<MyStudentResponse>, BadRequest>> GetMyStudent()
+
+    [HttpGet("my")]
+    [ProducesResponseType(typeof(StudentDisplay), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status401Unauthorized)]
+    public async Task<Results<Ok<StudentDisplay>, UnauthorizedHttpResult>> GetMyStudent()
     {
-        var myStudentId = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? "-1";
-        var myStudent = await _db.Students.FindAsync(int.Parse(myStudentId));
+        var myStudent = await GetMyStudent(_db);
         if (myStudent is null)
-            return TypedResults.BadRequest();
-        
-        return TypedResults.Ok(MyStudentResponse.FromStudent(myStudent));
+            return TypedResults.Unauthorized();
+
+        return TypedResults.Ok(myStudent.ToStudentDisplay());
     }
-    
 }

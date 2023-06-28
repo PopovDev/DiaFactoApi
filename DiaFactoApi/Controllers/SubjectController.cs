@@ -1,17 +1,18 @@
-﻿using System.Security.Claims;
+﻿using System.Net.Mime;
 using DiaFactoApi.Models;
 using DiaFactoApi.Models.Api.Subject;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
 
 namespace DiaFactoApi.Controllers;
 
 [Authorize]
 [ApiController]
 [Route("/subject")]
-public class SubjectController : ControllerBase
+[Consumes(MediaTypeNames.Application.Json)]
+[Produces(MediaTypeNames.Application.Json)]
+public class SubjectController : AuthBoundController
 {
     private readonly ILogger<SubjectController> _logger;
     private readonly DiaFactoDbContext _db;
@@ -24,75 +25,77 @@ public class SubjectController : ControllerBase
 
     private async Task<Subject?> GetSubjectById(int id)
     {
-        var myGroupId = User.FindFirstValue(ClaimTypes.GroupSid) ?? "-1";
-        var myGroup = await _db.Groups
-            .Include(g => g.Subjects)
-            .FirstOrDefaultAsync(g => g.Id == int.Parse(myGroupId));
+        var myGroup = await GetMyGroup(_db);
         return myGroup?.Subjects.FirstOrDefault(s => s.Id == id);
     }
 
 
     [HttpPost("create")]
+    [Authorize(Roles = "admin")]
+    [ProducesResponseType(typeof(SubjectDisplay), StatusCodes.Status201Created)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status401Unauthorized)]
     public async Task<Results<Created<SubjectDisplay>, BadRequest>> CreateSubject(CreateSubjectRequest request)
     {
-        var myGroupId = User.FindFirstValue(ClaimTypes.GroupSid) ?? "-1";
-        var myGroup = await _db.Groups.FindAsync(int.Parse(myGroupId));
-        if (myGroup is null)
+        var myGroup = await GetMyGroup(_db);
+        var student = await GetMyStudent(_db);
+        if (myGroup is null || student is null || !student.HasAdminRights)
             return TypedResults.BadRequest();
-
-        var subject = new Subject
-        {
-            Name = request.Name,
-            Info = request.Info,
-            Group = myGroup,
-            GroupId = myGroup.Id,
-            Teacher = request.Teacher,
-        };
+     
+        var subject = request.ToSubject(myGroup);
         await _db.Subjects.AddAsync(subject);
         await _db.SaveChangesAsync();
-        _logger.LogInformation("Group {GroupId} created subject {SubjectId}", myGroup.Id, subject.Id);
-        var display = SubjectDisplay.FromSubject(subject);
+        _logger.LogInformation("[Subject] [Create] [{SubjectId}] {SubjectName}", subject.Id, subject.Name);
+        var display = subject.ToSubjectDisplay();
         return TypedResults.Created($"subject/{subject.Id}", display);
     }
 
     [HttpGet]
-    public async Task<Ok<SubjectDisplay[]>> GetSubjects()
+    [ProducesResponseType(typeof(SubjectDisplay[]), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status401Unauthorized)]
+    public async Task<Results<Ok<SubjectDisplay[]>, UnauthorizedHttpResult>> GetSubjects()
     {
-        var myGroupId = User.FindFirstValue(ClaimTypes.GroupSid) ?? "-1";
-        var myGroup = await _db.Groups
-            .Include(g => g.Subjects)
-            .FirstOrDefaultAsync(g => g.Id == int.Parse(myGroupId));
+        var myGroup = await GetMyGroup(_db);
         if (myGroup is null)
-            return TypedResults.Ok(Array.Empty<SubjectDisplay>());
+            return TypedResults.Unauthorized();
 
-        var subjects = myGroup.Subjects.Select(SubjectDisplay.FromSubject).ToArray();
+        var subjects = myGroup.Subjects.Select(x => x.ToSubjectDisplay()).ToArray();
         return TypedResults.Ok(subjects);
     }
 
     [HttpGet("{subjectId:int}")]
-    public async Task<Results<Ok<SubjectDisplay>, BadRequest>> GetSubject(int subjectId)
+    [ProducesResponseType(typeof(SubjectDisplay), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status401Unauthorized)]
+    public async Task<Results<Ok<SubjectDisplay>, UnauthorizedHttpResult>> GetSubject(int subjectId)
     {
         var subject = await GetSubjectById(subjectId);
         if (subject is null)
-            return TypedResults.BadRequest();
+            return TypedResults.Unauthorized();
         
-        return TypedResults.Ok(SubjectDisplay.FromSubject(subject));
+        return TypedResults.Ok(subject.ToSubjectDisplay());
     }
 
     [HttpDelete("{subjectId:int}")]
+    [Authorize(Roles = "admin")]
+    [ProducesResponseType(typeof(void), StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status400BadRequest)]
     public async Task<Results<NoContent, BadRequest>> DeleteSubject(int subjectId)
     {
         var subject = await GetSubjectById(subjectId);
-        if (subject is null)
+        var student = await GetMyStudent(_db);
+        if (subject is null || student is null || !student.HasAdminRights)
             return TypedResults.BadRequest();
         
         _db.Subjects.Remove(subject);
         await _db.SaveChangesAsync();
-        _logger.LogInformation("Subject [{SubjectId}] deleted", subject.Id);
+        _logger.LogInformation("[Subject] [Delete] [{SubjectId}] {SubjectName}", subject.Id, subject.Name);
         return TypedResults.NoContent();
     }
 
     [HttpPut("{subjectId:int}")]
+    [ProducesResponseType(typeof(void), StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status401Unauthorized)]
     public async Task<Results<NoContent, BadRequest>> ChangeSubject(int subjectId, ChangeSubjectRequest request)
     {
         var subject = await GetSubjectById(subjectId);
@@ -112,7 +115,7 @@ public class SubjectController : ControllerBase
             subject.Teacher = request.Teacher;
         
         await _db.SaveChangesAsync();
-        _logger.LogInformation("Subject [{SubjectId}] changed", subject.Id);
+        _logger.LogInformation("[Subject] [Change] [{SubjectId}] {SubjectName}", subject.Id, subject.Name);
         return TypedResults.NoContent();
     }
 }

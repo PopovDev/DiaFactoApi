@@ -1,13 +1,14 @@
 using System.Text;
 using DiaFactoApi;
+using DiaFactoApi.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.CookiePolicy;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 var configuration = builder.Configuration;
-
 var dbConnectionString = configuration.GetConnectionString("DefaultConnection");
 
 builder.Services.AddOptions<AppConfig>()
@@ -41,7 +42,8 @@ builder.Services.AddAuthentication(options =>
     });
 builder.Services.AddAuthorization();
 builder.Services.AddControllers();
-builder.Services.AddSingleton<ExternalAuthKeyHolder>();
+builder.Services.AddSingleton<ExternalAuthKeyService>();
+builder.Services.AddTransient<TokenService>();
 builder.Services.AddDbContext<DiaFactoDbContext>(options => options.UseNpgsql(dbConnectionString));
 builder.Services.AddCors(options =>
 {
@@ -55,8 +57,62 @@ builder.Services.AddCors(options =>
     });
 });
 
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "DiaFactoApi", Version = "v1" });
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    {
+        Description = @"JWT Authorization header using the Bearer scheme.
+Enter 'Bearer' [space] and then your token in the text input below.
+",
+        Name = "Authorization",
+        In = ParameterLocation.Header,
+        Type = SecuritySchemeType.ApiKey,
+        Scheme = "Bearer"
+    });
+    c.AddSecurityDefinition("Cookie", new OpenApiSecurityScheme
+    {
+        Description = @"Cookie Authorization header using the Cookie scheme.
+Enter 'Cookie' [space] and then your token in the text input below.
+",
+        Name = "Authorization",
+        In = ParameterLocation.Cookie,
+        Type = SecuritySchemeType.ApiKey,
+        Scheme = "Cookie"
+    });
+    
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        {
+            new OpenApiSecurityScheme
+            {
+                Reference = new OpenApiReference
+                {
+                    Type = ReferenceType.SecurityScheme,
+                    Id = "Bearer"
+                },
+                Scheme = "oauth2",
+                Name = "Bearer",
+                In = ParameterLocation.Header,
+            },
+            new List<string>()
+        }
+    });
+});
+
 
 var app = builder.Build();
+
+app.UseSwagger();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseDeveloperExceptionPage();
+    app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "DiaFactoApi v1"));
+    
+}
+
 
 app.UseCors();
 app.UseCookiePolicy(new CookiePolicyOptions

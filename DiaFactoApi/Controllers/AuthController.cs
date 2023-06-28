@@ -1,129 +1,69 @@
-﻿using System.IdentityModel.Tokens.Jwt;
+﻿using System.Net.Mime;
 using System.Security.Claims;
-using System.Security.Cryptography;
-using System.Text;
 using DiaFactoApi.Models;
 using DiaFactoApi.Models.Api.Auth;
+using DiaFactoApi.Services;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
-using Microsoft.IdentityModel.Tokens;
 
 namespace DiaFactoApi.Controllers;
 
+using AuthOperationResults = Results<Ok<LoginResponseModel>, UnauthorizedHttpResult>;
+
 [ApiController]
 [Route("auth")]
+[Consumes(MediaTypeNames.Application.Json)]
+[Produces(MediaTypeNames.Application.Json)]
 public class AuthController : ControllerBase
 {
     private readonly AppConfig _appConfig;
     private readonly ILogger<AuthController> _logger;
     private readonly DiaFactoDbContext _diaFactoDbContext;
-    private readonly ExternalAuthKeyHolder _externalAuthKeyHolder;
+    private readonly ExternalAuthKeyService _externalAuthKeyService;
+    private readonly TokenService _tokenService;
 
-    public AuthController(IOptions<AppConfig> jwtSettings, ILogger<AuthController> logger,
-        DiaFactoDbContext diaFactoDbContext, ExternalAuthKeyHolder externalAuthKeyHolder)
+    public AuthController(ILogger<AuthController> logger,
+        DiaFactoDbContext diaFactoDbContext, ExternalAuthKeyService externalAuthKeyService, TokenService tokenService,
+        IOptions<AppConfig> appConfig)
     {
         _logger = logger;
         _diaFactoDbContext = diaFactoDbContext;
-        _externalAuthKeyHolder = externalAuthKeyHolder;
-        _appConfig = jwtSettings.Value;
-    }
-
-    private async Task<(Student, LoginRequestMode)?> GetStudentInfo()
-    {
-        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        if (string.IsNullOrEmpty(userId)) return null;
-        var student = await _diaFactoDbContext.Students.FindAsync(int.Parse(userId));
-        if (student is null) return null;
-        var passwordHash = User.FindFirstValue(ClaimTypes.Hash);
-        if (string.IsNullOrEmpty(passwordHash)) return null;
-        var hashOfPassword = SHA256.HashData(Encoding.UTF8.GetBytes(student.Password));
-        if (Convert.ToBase64String(hashOfPassword) != passwordHash) return null;
-        var loginRequestMode = User.FindFirstValue("loginMode");
-        if (string.IsNullOrEmpty(loginRequestMode)) return null;
-        var loginRequestModeEnum = Enum.Parse<LoginRequestMode>(loginRequestMode);
-        return (student, loginRequestModeEnum);
-    }
-
-    private string GenerateToken(Student student, LoginRequestMode loginRequestMode)
-    {
-        var hashOfPassword = SHA256.HashData(Encoding.UTF8.GetBytes(student.Password));
-
-        var claims = new List<Claim>
-        {
-            new(ClaimTypes.GroupSid, student.GroupId.ToString(), ClaimValueTypes.Integer32),
-            new(ClaimTypes.NameIdentifier, student.Id.ToString(), ClaimValueTypes.Integer32),
-            new(ClaimTypes.Role, "user"),
-            new(ClaimTypes.Name, student.Name),
-            new(ClaimTypes.GivenName, student.ShortName),
-            new(ClaimTypes.Hash, Convert.ToBase64String(hashOfPassword)),
-            new("loginMode", loginRequestMode.ToString(), ClaimValueTypes.String)
-        };
-
-        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_appConfig.Secret));
-        var signingCredentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
-        var token = new JwtSecurityToken(
-            _appConfig.Issuer,
-            _appConfig.Audience,
-            claims,
-            expires: DateTime.UtcNow.Add(_appConfig.TokenLifetime),
-            signingCredentials: signingCredentials
-        );
-        return new JwtSecurityTokenHandler().WriteToken(token);
+        _externalAuthKeyService = externalAuthKeyService;
+        _tokenService = tokenService;
+        _appConfig = appConfig.Value;
     }
 
     [AllowAnonymous]
-    [HttpPost("login")]
-    public async Task<Results<Ok<LoginResponseModel>, UnauthorizedHttpResult, BadRequest>> Login(
-        [FromBody] LoginRequestModel loginRequestModel)
+    [HttpPost("login/{type:regex(web|external)}")]
+    [ProducesResponseType(typeof(void), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(LoginResponseModel), StatusCodes.Status200OK)]
+    public async Task<AuthOperationResults> Login([FromBody] LoginRequestModel loginRequestModel, string type)
     {
-        var user = await _diaFactoDbContext.Students.FindAsync(loginRequestModel.UserId);
-        if (user is null || user.GroupId != loginRequestModel.GroupId)
-            return TypedResults.BadRequest();
+        var student = await _diaFactoDbContext.Students.FindAsync(loginRequestModel.UserId);
+        if (student is null || student.GroupId != loginRequestModel.GroupId)
+            return TypedResults.Unauthorized();
 
-        switch (loginRequestModel.LoginMode)
+        switch (type)
         {
-            case LoginRequestMode.Web:
-                if (!BCrypt.Net.BCrypt.Verify(loginRequestModel.Password, user.Password))
+            case "web":
+                if (!_tokenService.TryAuthenticatePassword(student, loginRequestModel.Password))
                     return TypedResults.Unauthorized();
-                break;
-            case LoginRequestMode.ExternalKey:
-                if (!_externalAuthKeyHolder.TryTakeUser(loginRequestModel.Password, out var userId) ||
-                    userId != user.Id)
+                return TypedResults.Ok(GenerateLoginResponse(student, LoginRequestMode.Web));
+            case "external":
+                if (!_tokenService.TryAuthenticateExternalKey(student, loginRequestModel.Password))
                     return TypedResults.Unauthorized();
-                break;
+                return TypedResults.Ok(GenerateLoginResponse(student, LoginRequestMode.ExternalKey));
             default:
-                throw new ArgumentOutOfRangeException(nameof(loginRequestModel));
+                return TypedResults.Unauthorized();
         }
-
-        var tokenString = GenerateToken(user, loginRequestModel.LoginMode);
-        var expirationDate = DateTimeOffset.UtcNow.Add(_appConfig.TokenLifetime);
-        switch (loginRequestModel.LoginMode)
-        {
-            case LoginRequestMode.Web:
-                var cookieOptions = new CookieOptions { Expires = expirationDate };
-                Response.Cookies.Append(_appConfig.CookieName, tokenString, cookieOptions);
-                tokenString = "set";
-                break;
-            case LoginRequestMode.ExternalKey:
-                break;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(loginRequestModel));
-        }
-
-        return TypedResults.Ok(new LoginResponseModel
-        {
-            Token = tokenString,
-            ExpiresAt = expirationDate,
-            UserId = user.Id,
-            GroupId = user.GroupId,
-            LoginMode = loginRequestModel.LoginMode
-        });
     }
 
     [Authorize]
     [HttpPost("logout")]
+    [ProducesResponseType(typeof(void), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status401Unauthorized)]
     public Ok Logout()
     {
         Response.Cookies.Delete(_appConfig.CookieName);
@@ -133,13 +73,55 @@ public class AuthController : ControllerBase
 
     [Authorize]
     [HttpPost("extendSession")]
-    public async Task<Results<Ok<LoginResponseModel>, BadRequest>> ExtendSession()
+    [ProducesResponseType(typeof(LoginResponseModel), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status400BadRequest)]
+    public async Task<AuthOperationResults> ExtendSession()
     {
-        var studentInfo = await GetStudentInfo();
-        if (!studentInfo.HasValue) return TypedResults.BadRequest();
+        var studentInfo = await _tokenService.GetStudentInfo(User);
+        if (!studentInfo.HasValue) return TypedResults.Unauthorized();
         var (student, loginRequestMode) = studentInfo.Value;
+        return TypedResults.Ok(GenerateLoginResponse(student, loginRequestMode));
+    }
 
-        var tokenString = GenerateToken(student, loginRequestMode);
+    [Authorize]
+    [HttpPost("changePassword")]
+    [ProducesResponseType(typeof(LoginResponseModel), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status401Unauthorized)]
+    public async Task<AuthOperationResults> ChangePassword([FromBody] ChangePasswordRequestModel changePassRequestModel)
+    {
+        var studentInfo = await _tokenService.GetStudentInfo(User);
+        if (!studentInfo.HasValue) return TypedResults.Unauthorized();
+        var (user, loginMode) = studentInfo.Value;
+
+        if (!_tokenService.TryAuthenticatePassword(user, changePassRequestModel.OldPassword))
+            return TypedResults.Unauthorized();
+
+        await _tokenService.ChangePassword(user, changePassRequestModel.NewPassword);
+        return TypedResults.Ok(GenerateLoginResponse(user, loginMode));
+    }
+
+    [Authorize]
+    [HttpPost("generateExternalKey")]
+    [ProducesResponseType(typeof(LoginGenerateExternalKeyResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status401Unauthorized)]
+    
+    public async Task<Results<Ok<LoginGenerateExternalKeyResponse>, UnauthorizedHttpResult>> GenerateExternalKey()
+    {
+        var studentInfo = await _tokenService.GetStudentInfo(User);
+        if (!studentInfo.HasValue)
+            return TypedResults.Unauthorized();
+        var (user, loginMode) = studentInfo.Value;
+        
+        if (loginMode != LoginRequestMode.Web)
+            return TypedResults.Unauthorized();
+        
+        var (key, expires) = _externalAuthKeyService.GenerateKey(user.Id);
+        return TypedResults.Ok(new LoginGenerateExternalKeyResponse { Key = key, Expires = expires });
+    }
+
+    private LoginResponseModel GenerateLoginResponse(Student student, LoginRequestMode loginRequestMode)
+    {
+        var tokenString = _tokenService.GenerateToken(student, loginRequestMode);
         var expirationDate = DateTimeOffset.UtcNow.Add(_appConfig.TokenLifetime);
         switch (loginRequestMode)
         {
@@ -154,67 +136,13 @@ public class AuthController : ControllerBase
                 throw new ArgumentOutOfRangeException(nameof(loginRequestMode));
         }
 
-        return TypedResults.Ok(new LoginResponseModel
+        return new LoginResponseModel
         {
             Token = tokenString,
             ExpiresAt = expirationDate,
             UserId = student.Id,
             GroupId = student.GroupId,
             LoginMode = loginRequestMode
-        });
-    }
-
-    [Authorize]
-    [HttpPost("changePassword")]
-    public async Task<Results<Ok<LoginResponseModel>, BadRequest, UnauthorizedHttpResult>> ChangePassword(
-        [FromBody] ChangePasswordRequestModel changePasswordRequestModel)
-    {
-        var studentInfo = await GetStudentInfo();
-        if (!studentInfo.HasValue) return TypedResults.BadRequest();
-        var (user, loginMode) = studentInfo.Value;
-
-        if (!BCrypt.Net.BCrypt.Verify(changePasswordRequestModel.OldPassword, user.Password))
-        {
-            _logger.LogInformation("User [{UserId}] is not authorized to change password", user.Id);
-            return TypedResults.Unauthorized();
-        }
-
-        user.Password = BCrypt.Net.BCrypt.HashPassword(changePasswordRequestModel.NewPassword);
-        await _diaFactoDbContext.SaveChangesAsync();
-        var tokenString = GenerateToken(user, loginMode);
-        var expirationDate = DateTimeOffset.UtcNow.Add(_appConfig.TokenLifetime);
-        switch (loginMode)
-        {
-            case LoginRequestMode.Web:
-                var cookieOptions = new CookieOptions { Expires = expirationDate };
-                Response.Cookies.Append(_appConfig.CookieName, tokenString, cookieOptions);
-                tokenString = "set";
-                break;
-            case LoginRequestMode.ExternalKey:
-                break;
-            default:
-                throw new ArgumentOutOfRangeException(nameof(changePasswordRequestModel));
-        }
-
-        return TypedResults.Ok(new LoginResponseModel
-        {
-            Token = tokenString,
-            ExpiresAt = expirationDate,
-            UserId = user.Id,
-            GroupId = user.GroupId,
-            LoginMode = loginMode
-        });
-    }
-
-    [Authorize]
-    [HttpPost("generateExternalKey")]
-    public async Task<Results<Ok<LoginGenerateExternalKeyResponse>, BadRequest>> GenerateExternalKey()
-    {
-        var studentInfo = await GetStudentInfo();
-        if (!studentInfo.HasValue) return TypedResults.BadRequest();
-        var (user, loginMode) = studentInfo.Value;
-        if (loginMode != LoginRequestMode.Web) return TypedResults.BadRequest();
-        var (key, expires) = _externalAuthKeyHolder.GenerateKey(user.Id);
-        return TypedResults.Ok(new LoginGenerateExternalKeyResponse { Key = key, Expires = expires });
+        };
     }
 }

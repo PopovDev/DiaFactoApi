@@ -1,13 +1,14 @@
 ﻿using System.Collections.Concurrent;
+using System.Security.Cryptography;
 using DiaFactoApi.Models.Internal;
 
-namespace DiaFactoApi;
+namespace DiaFactoApi.Services;
 
-public class ExternalAuthKeyHolder
+public class ExternalAuthKeyService
 {
-    private readonly ILogger<ExternalAuthKeyHolder> _logger;
+    private readonly ILogger<ExternalAuthKeyService> _logger;
     private readonly ConcurrentDictionary<string, ExternalAuthKey> _keys = new();
-    public ExternalAuthKeyHolder(ILogger<ExternalAuthKeyHolder> logger) => _logger = logger;
+    public ExternalAuthKeyService(ILogger<ExternalAuthKeyService> logger) => _logger = logger;
     private static readonly TimeSpan KeyLifetime = TimeSpan.FromMinutes(5);
 
     private void RemoveExpired()
@@ -31,8 +32,8 @@ public class ExternalAuthKeyHolder
             _logger.LogInformation("Removed old key {key} for user {userId}", oldKey, userId);
         }
 
-        var randomInt = Random.Shared.Next(10000, 9999999);
-        var key = $"{userId}{randomInt}";
+        var random = Guid.NewGuid().ToString()[..8];
+        var key = $"{userId}{random}";
         var externalKey = new ExternalAuthKey
         {
             Key = key,
@@ -44,17 +45,13 @@ public class ExternalAuthKeyHolder
         return (key, externalKey.CreatedAt + KeyLifetime);
     }
 
-    public bool TryTakeUser(string key, out int userId)
+    public bool TryTakeUser(string key, int expectedUserId)
     {
         RemoveExpired();
-        if (_keys.TryRemove(key, out var externalKey))
-        {
-            userId = externalKey.UserId;
-            _logger.LogInformation("Removed key {key} for user {userId}", key, userId);
-            return true;
-        }
-
-        userId = default;
-        return false;
+        if (!_keys.TryGetValue(key, out var externalKey) || externalKey.UserId != expectedUserId)
+            return false;
+        _keys.TryRemove(key, out _);
+        _logger.LogInformation("Removed key {key} for user {userId}", key, expectedUserId);
+        return true;
     }
 }

@@ -1,4 +1,5 @@
-﻿using System.Security.Claims;
+﻿using System.Net.Mime;
+using System.Security.Claims;
 using DiaFactoApi.Models.Api.Group;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http.HttpResults;
@@ -10,6 +11,8 @@ namespace DiaFactoApi.Controllers;
 [Authorize]
 [ApiController]
 [Route("/group")]
+[Consumes(MediaTypeNames.Application.Json)]
+[Produces(MediaTypeNames.Application.Json)]
 public class GroupController : ControllerBase
 {
     private readonly ILogger<GroupController> _logger;
@@ -23,6 +26,7 @@ public class GroupController : ControllerBase
 
     [AllowAnonymous]
     [HttpGet("anon")]
+    [ProducesResponseType(typeof(AnonGroupsResponse), StatusCodes.Status200OK)]
     public async Task<Ok<AnonGroupsResponse>> GetAnonGroups()
     {
         var groups = await _db.Groups
@@ -33,24 +37,28 @@ public class GroupController : ControllerBase
     }
 
     [HttpGet("my")]
-    public async Task<Results<Ok<MyGroupResponse>, BadRequest>> GetMyGroup()
+    [ProducesResponseType(typeof(MyGroupResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status401Unauthorized)]
+    public async Task<Results<Ok<MyGroupResponse>, UnauthorizedHttpResult>> GetMyGroup()
     {
         var myGroupId = User.FindFirstValue(ClaimTypes.GroupSid) ?? "-1";
         var myGroup = await _db.Groups.FindAsync(int.Parse(myGroupId));
         if (myGroup is null)
-            return TypedResults.BadRequest();
+            return TypedResults.Unauthorized();
         
         return TypedResults.Ok(MyGroupResponse.FromGroup(myGroup));
     }
     
     [HttpPut("my/info")]
-    public async Task<Results<NoContent, BadRequest>> ChangeGroupInfo(ChangeGroupInfoRequest request)
+    [ProducesResponseType(typeof(void), StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status401Unauthorized)]
+    public async Task<Results<NoContent, UnauthorizedHttpResult>> ChangeGroupInfo(ChangeGroupInfoRequest request)
     {
         var myGroupId = User.FindFirstValue(ClaimTypes.GroupSid) ?? "-1";
         var myGroup = await _db.Groups.FindAsync(int.Parse(myGroupId));
         
         if (myGroup is null)
-            return TypedResults.BadRequest();
+            return TypedResults.Unauthorized();
         
         myGroup.Info = request.Info;
         _logger.LogInformation("Group {GroupId} changed info to {Info}", myGroup.Id, request.Info);
